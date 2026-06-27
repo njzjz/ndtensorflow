@@ -135,3 +135,27 @@ def test_arange_float32_large_offset_regression():
 
     assert out.dtype == ndt.float32
     assert out.shape == (32,)
+
+
+def test_gradient_tape_accepts_array_sources_and_targets():
+    x = ndt.asarray([1.0, 2.0, 3.0])
+
+    with tf.GradientTape() as tape:
+        tape.watch(x)
+        y = ndt.sum(ndt.square(x))
+
+    grad = tape.gradient(y, x)
+
+    assert isinstance(grad, ndt.Array)
+    assert values(grad) == [2.0, 4.0, 6.0]
+
+
+def test_tf_function_accepts_and_returns_arrays():
+    @tf.function
+    def f(x):
+        return ndt.sum(ndt.square(x))
+
+    out = f(ndt.asarray([1.0, 2.0, 3.0]))
+
+    assert isinstance(out, ndt.Array)
+    assert float(out) == 14.0
