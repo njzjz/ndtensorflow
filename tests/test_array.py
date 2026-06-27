@@ -136,7 +136,6 @@ def test_arange_float32_large_offset_regression():
     assert out.dtype == ndt.float32
     assert out.shape == (32,)
 
-
 def test_gradient_tape_accepts_array_sources_and_targets():
     x = ndt.asarray([1.0, 2.0, 3.0])
 
@@ -159,3 +158,23 @@ def test_tf_function_accepts_and_returns_arrays():
 
     assert isinstance(out, ndt.Array)
     assert float(out) == 14.0
+
+
+def test_xla_dynamic_shape_repeat_and_unique_regressions():
+    @tf.function(jit_compile=True, input_signature=[tf.TensorSpec([None], tf.int32)])
+    def compiled(x):
+        array = ndt.asarray(x)
+        inverse = ndt.unique_inverse(array)
+        return (
+            ndt.repeat(array, 2).unwrap(),
+            ndt.unique_values(array).unwrap(),
+            inverse.values.unwrap(),
+            inverse.inverse_indices.unwrap(),
+        )
+
+    repeated, unique, inverse_values, inverse_indices = compiled(tf.constant([1, 2, 1], dtype=tf.int32))
+
+    assert repeated.numpy().tolist() == [1, 1, 2, 2, 1, 1]
+    assert unique.numpy().tolist() == [1, 2]
+    assert inverse_values.numpy().tolist() == [1, 2]
+    assert inverse_indices.numpy().tolist() == [0, 1, 0]
