@@ -200,6 +200,8 @@ class Array:
     def _scalar_value(self) -> Any:
         if self.ndim != 0:
             raise TypeError("only 0-d arrays can be converted to Python scalars")
+        if not tf.executing_eagerly():
+            raise TypeError("cannot convert a TensorFlow graph tensor to a Python scalar")
         return self._tensor.numpy().item()
 
     def __bool__(self, /) -> bool:

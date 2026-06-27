@@ -1,9 +1,28 @@
 import math
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 import tensorflow as tf
 
 import ndtensorflow as ndt
+
+
+def run_python(script):
+    env = os.environ.copy()
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def values(x):
@@ -155,3 +174,61 @@ def test_xla_dynamic_shape_repeat_and_unique_regressions():
     assert unique.numpy().tolist() == [1, 2]
     assert inverse_values.numpy().tolist() == [1, 2]
     assert inverse_indices.numpy().tolist() == [0, 1, 0]
+
+
+def test_tensorflow_v1_graph_mode_session_regressions():
+    run_python(
+        """
+        import tensorflow as tf
+
+        tf.compat.v1.disable_eager_execution()
+        import ndtensorflow as ndt
+
+        x_placeholder = tf.compat.v1.placeholder(tf.float32, shape=(None, 2))
+        x = ndt.asarray(x_placeholder)
+        summed = ndt.sum(x * 2, axis=1)
+        repeated = ndt.repeat(ndt.reshape(x, (-1,)), 2)
+        product = ndt.linalg.matmul(ndt.matrix_transpose(x), x)
+
+        i_placeholder = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        inverse = ndt.unique_inverse(ndt.asarray(i_placeholder))
+
+        for convert, value in (
+            (bool, True),
+            (int, 1),
+            (float, 1.0),
+            (complex, 1.0 + 2.0j),
+        ):
+            try:
+                convert(ndt.asarray(value))
+            except TypeError as exc:
+                assert "graph tensor" in str(exc)
+            else:
+                raise AssertionError("graph scalar conversion should fail")
+
+        with tf.compat.v1.Session() as session:
+            feed = {x_placeholder: [[1.0, 2.0], [3.0, 4.0]]}
+            assert session.run(summed.unwrap(), feed_dict=feed).tolist() == [6.0, 14.0]
+            assert session.run(repeated.unwrap(), feed_dict=feed).tolist() == [
+                1.0,
+                1.0,
+                2.0,
+                2.0,
+                3.0,
+                3.0,
+                4.0,
+                4.0,
+            ]
+            assert session.run(product.unwrap(), feed_dict=feed).tolist() == [
+                [10.0, 14.0],
+                [14.0, 20.0],
+            ]
+
+            values, inverse_indices = session.run(
+                [inverse.values.unwrap(), inverse.inverse_indices.unwrap()],
+                feed_dict={i_placeholder: [2, 1, 2]},
+            )
+            assert values.tolist() == [2, 1]
+            assert inverse_indices.tolist() == [0, 1, 0]
+        """
+    )
