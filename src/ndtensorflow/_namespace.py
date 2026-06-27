@@ -1648,7 +1648,7 @@ def repeat(x: Array, repeats: int | Array, /, *, axis: int | None = None) -> Arr
         tensor = tf.reshape(tensor, (-1,))
         axis = 0
     axis = _normalize_axis(axis, tensor.shape.rank)
-    n = tensor.shape[axis]
+    n = tf.shape(tensor, out_type=tf.int64)[axis]
     repeats_ = _unwrap(repeats)
     if isinstance(repeats_, tf.Tensor):
         repeats_ = tf.cast(repeats_, tf.int64)
@@ -1778,16 +1778,13 @@ def _isnan_tensor(x: tf.Tensor) -> tf.Tensor:
         return tf.math.is_nan(x)
     if x.dtype in _complex_floating_dtypes:
         return tf.math.is_nan(tf.math.real(x)) | tf.math.is_nan(tf.math.imag(x))
-    return tf.zeros(x.shape, dtype=tf.bool)
+    return tf.zeros(tf.shape(x), dtype=tf.bool)
 
 
 def _unique(x: Array) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     flat = tf.reshape(_unwrap(x), (-1,))
-    n = flat.shape[0]
-    if n == 0:
-        empty_index = tf.zeros((0,), dtype=tf.int64)
-        return flat, empty_index, empty_index, empty_index
-
+    n = tf.shape(flat, out_type=tf.int64)[0]
+    matrix_shape = tf.stack([n, n])
     idx = tf.range(n, dtype=tf.int64)
     equality = tf.equal(tf.expand_dims(flat, 1), tf.expand_dims(flat, 0))
     nan = _isnan_tensor(flat)
@@ -1795,10 +1792,15 @@ def _unique(x: Array) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     equality = equality | (tf.expand_dims(nan, 1) & tf.expand_dims(nan, 0) & same_position)
 
     first_indices = tf.reduce_min(
-        tf.where(equality, tf.broadcast_to(idx, (n, n)), tf.fill((n, n), tf.cast(n, tf.int64))),
+        tf.where(
+            equality,
+            tf.broadcast_to(idx, matrix_shape),
+            tf.fill(matrix_shape, tf.cast(n, tf.int64)),
+        ),
         axis=1,
     )
-    unique_mask = first_indices == idx
+    unique_mask = tf.equal(first_indices, idx)
+    unique_mask.set_shape((None,))
     indices = tf.boolean_mask(idx, unique_mask)
     values = tf.gather(flat, indices)
     inverse_equality = tf.equal(tf.expand_dims(first_indices, 1), tf.expand_dims(indices, 0))
@@ -1812,7 +1814,7 @@ def unique_all(x: Array) -> UniqueAllResult:
     return UniqueAllResult(
         Array._from_tensor(values),
         Array._from_tensor(indices),
-        Array._from_tensor(tf.reshape(inverse, _shape_tuple(x))),
+        Array._from_tensor(tf.reshape(inverse, tf.shape(_unwrap(x)))),
         Array._from_tensor(counts),
     )
 
@@ -1824,7 +1826,10 @@ def unique_counts(x: Array) -> UniqueCountsResult:
 
 def unique_inverse(x: Array) -> UniqueInverseResult:
     values, _, inverse, _ = _unique(x)
-    return UniqueInverseResult(Array._from_tensor(values), Array._from_tensor(tf.reshape(inverse, _shape_tuple(x))))
+    return UniqueInverseResult(
+        Array._from_tensor(values),
+        Array._from_tensor(tf.reshape(inverse, tf.shape(_unwrap(x)))),
+    )
 
 
 def unique_values(x: Array) -> Array:
