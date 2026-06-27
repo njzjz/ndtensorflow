@@ -6,6 +6,7 @@ from enum import IntEnum
 from typing import Any
 
 import tensorflow as tf
+from tensorflow.python.framework import composite_tensor_gradient
 
 
 class DLDeviceType(IntEnum):
@@ -13,7 +14,22 @@ class DLDeviceType(IntEnum):
     CUDA = 2
 
 
-class Array:
+class _ArrayGradient(composite_tensor_gradient.CompositeTensorGradient):
+    def get_gradient_components(self, value: Array) -> tf.Tensor:
+        return value._tensor
+
+    def replace_gradient_components(
+        self,
+        value: Array,
+        component_grads: tf.Tensor | None,
+    ) -> Array | None:
+        del value
+        if component_grads is None:
+            return None
+        return Array._from_tensor(component_grads)
+
+
+class Array(tf.experimental.ExtensionType):
     """User-facing TensorFlow-backed array object.
 
     The object owns the Array API surface. TensorFlow tensors remain plain
@@ -21,25 +37,28 @@ class Array:
     """
 
     __array_priority__ = 1
+    __composite_gradient__ = _ArrayGradient()
 
     _tensor: tf.Tensor
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        raise TypeError(
-            "'Array' cannot be instantiated directly. Use 'ndtensorflow.asarray' "
-            "or another creation function instead."
-        )
+    def __init__(self, tensor: Any | None = None, /) -> None:
+        if tensor is None:
+            raise TypeError(
+                "'Array' cannot be instantiated without data. Use "
+                "'ndtensorflow.asarray' or another creation function instead."
+            )
+        if not isinstance(tensor, tf.Tensor):
+            tensor = tf.convert_to_tensor(tensor)
+        self._tensor = tensor
 
     @classmethod
     def _from_tensor(cls, tensor: Any, /) -> Array:
         if isinstance(tensor, Array):
             return tensor
-        if not isinstance(tensor, tf.Tensor):
-            tensor = tf.convert_to_tensor(tensor)
-        inst = cls.__new__(cls)
-        inst._tensor = tensor
-        return inst
+        return cls(tensor)
+
+    def _replace_tensor(self, tensor: tf.Tensor) -> None:
+        self.__dict__["_tensor"] = tensor
 
     def unwrap(self) -> tf.Tensor:
         """Return the wrapped TensorFlow tensor."""
@@ -183,10 +202,12 @@ class Array:
         value_tensor = _value_to_tensor(value, dtype=self.dtype)
 
         if isinstance(key, tf.Tensor) and key.dtype == tf.bool:
-            self._tensor = tf.where(
-                key,
-                tf.broadcast_to(value_tensor, tf.shape(self._tensor)),
-                self._tensor,
+            self._replace_tensor(
+                tf.where(
+                    key,
+                    tf.broadcast_to(value_tensor, tf.shape(self._tensor)),
+                    self._tensor,
+                )
             )
             return
 
@@ -195,7 +216,7 @@ class Array:
             variable[key].assign(value_tensor)
         except Exception as exc:  # pragma: no cover - TensorFlow controls details.
             raise TypeError(f"unsupported TensorFlow assignment index: {key!r}") from exc
-        self._tensor = tf.convert_to_tensor(variable)
+        self._replace_tensor(tf.convert_to_tensor(variable))
 
     def _scalar_value(self) -> Any:
         if self.ndim != 0:
