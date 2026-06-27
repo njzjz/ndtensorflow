@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ndtensorflow"
+description = "TensorFlow backed Array API namespace with an owned Array object."
+readme = "README.md"
+dynamic = ["version"]
+requires-python = ">=3.10"
+dependencies = ["tensorflow>=2.16"]
+keywords = ["tensorflow", "array-api"]
+
+[project.optional-dependencies]
+test = ["pytest", "ruff"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ndtensorflow*"]
+
+[tool.setuptools.package-data]
+ndtensorflow = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "W"]
+ignore = [
+    "E501",
+    "N803",
+    "N806",
+    "N807",
+    "UP007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/ndtensorflow/__init__.py" = ["F401", "F403", "I001"]
+"tests/*" = ["N802"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "ignore:.*google.protobuf.*:DeprecationWarning",
+]
