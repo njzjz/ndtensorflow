@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Run Ruff
+        run: python -m ruff check .
+
+      - name: Run pytest
+        run: python -m pytest -q
+
+  array-api-tests:
+    name: Array API Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      ARRAY_API_TESTS_COMMIT: 55fcc60179efa2680ddd6cd926ddf17b83530e2b
+      ARRAY_API_TESTS_MODULE: ndtensorflow
+      TF_CPP_MIN_LOG_LEVEL: "2"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Check out array-api-tests
+        run: |
+          git clone https://github.com/data-apis/array-api-tests.git external/array-api-tests
+          git -C external/array-api-tests checkout "$ARRAY_API_TESTS_COMMIT"
+          git -C external/array-api-tests submodule update --init --recursive
+
+      - name: Install array-api-tests dependencies
+        run: python -m pip install -r external/array-api-tests/requirements.txt
+
+      - name: Run array-api-tests
+        run: |
+          python - <<'PY'
+          from hypothesis import settings
+          import pytest
+          import sys
+
+          settings.register_profile("ndtensorflow", deadline=None)
+          sys.exit(pytest.main([
+              "-q",
+              "--hypothesis-profile=ndtensorflow",
+              "external/array-api-tests/array_api_tests",
+              "--maxfail=20",
+          ]))
+          PY
