@@ -432,6 +432,18 @@ def result_type(*arrays_and_dtypes: Array | tf.Tensor | DType | complex) -> DTyp
     return dtype
 
 
+def _result_type_with_scalars(x1: Any, x2: Any) -> DType:
+    x1_is_scalar = isinstance(x1, _py_scalars)
+    x2_is_scalar = isinstance(x2, _py_scalars)
+    if x1_is_scalar and x2_is_scalar:
+        return _promote_dtypes(_dtype_of(x1), _dtype_of(x2))
+    if x1_is_scalar:
+        return _promote_scalar(_dtype_of(x2), x1)
+    if x2_is_scalar:
+        return _promote_scalar(_dtype_of(x1), x2)
+    return result_type(x1, x2)
+
+
 def _promote_two(x1: Array | tf.Tensor | complex, x2: Array | tf.Tensor | complex) -> tuple[tf.Tensor, tf.Tensor]:
     dtype = result_type(x1, x2)
     return _to_tensor(x1, dtype), _to_tensor(x2, dtype)
@@ -600,10 +612,10 @@ def arange(
                 dtype = tf.int32 if py_all(isinstance(i, int) for i in (start, stop, step)) else tf.float32
             return Array._from_tensor(tf.zeros((0,), dtype=dtype))
         if dtype is None:
-            return Array._from_tensor(tf.range(start, stop, step))
-        work_dtype = tf.float64 if dtype in (tf.float64, tf.complex128) else tf.float32
-        if dtype in _integral_dtypes:
-            work_dtype = tf.int64
+            if py_all(isinstance(i, int) for i in (start, stop, step)):
+                return Array._from_tensor(tf.range(start, stop, step))
+            return Array._from_tensor(tf.cast(tf.range(start, stop, step, dtype=tf.float64), tf.float32))
+        work_dtype = tf.int64 if dtype in _integral_dtypes else tf.float64
         return Array._from_tensor(tf.cast(tf.range(start, stop, step, dtype=work_dtype), dtype))
 
 
@@ -1821,8 +1833,9 @@ def unique_values(x: Array) -> Array:
 
 
 def isin(x1: Array | int, x2: Array | int, /, *, invert: py_bool = False) -> Array:
-    x1_ = _to_tensor(x1)
-    x2_ = tf.reshape(_to_tensor(x2, x1_.dtype), (-1,))
+    dtype = _result_type_with_scalars(x1, x2)
+    x1_ = _to_tensor(x1, dtype)
+    x2_ = tf.reshape(_to_tensor(x2, dtype), (-1,))
     out = tf.reduce_any(tf.equal(tf.expand_dims(x1_, -1), x2_), axis=-1)
     return Array._from_tensor(tf.logical_not(out) if invert else out)
 

@@ -120,3 +120,18 @@ def test_statistical_edge_case_regressions():
     out = ndt.std(y, axis=(), correction=1)
     assert out.shape == y.shape
     assert values(out) == [0.0, 0.0]
+
+
+def test_isin_uint64_scalar_regression():
+    out = ndt.isin(2**63, ndt.asarray([], dtype=ndt.uint64))
+
+    assert out.shape == ()
+    assert out.dtype == ndt.bool
+    assert bool(out) is False
+
+
+def test_arange_float32_large_offset_regression():
+    out = ndt.arange(-2147483328, -2147482646, step=21.3125, dtype=ndt.float32)
+
+    assert out.dtype == ndt.float32
+    assert out.shape == (32,)
