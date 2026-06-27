@@ -444,6 +444,10 @@ def _result_type_with_scalars(x1: Any, x2: Any) -> DType:
     return result_type(x1, x2)
 
 
+def _known_unequal(x1: int | None, x2: int | None) -> py_bool:
+    return x1 is not None and x2 is not None and x1 != x2
+
+
 def _promote_two(x1: Array | tf.Tensor | complex, x2: Array | tf.Tensor | complex) -> tuple[tf.Tensor, tf.Tensor]:
     dtype = result_type(x1, x2)
     return _to_tensor(x1, dtype), _to_tensor(x2, dtype)
@@ -1480,16 +1484,16 @@ def matmul(x1: Array, x2: Array, /) -> Array:
         x1.shape.rank == 0
         or x2.shape.rank == 0
         or x1.shape.rank == x2.shape.rank == 1
-        and x1.shape != x2.shape
+        and _known_unequal(x1.shape[0], x2.shape[0])
         or x1.shape.rank == 1
         and x2.shape.rank >= 2
-        and x1.shape[0] != x2.shape[-2]
+        and _known_unequal(x1.shape[0], x2.shape[-2])
         or x2.shape.rank == 1
         and x1.shape.rank >= 2
-        and x2.shape[0] != x1.shape[-1]
+        and _known_unequal(x2.shape[0], x1.shape[-1])
         or x1.shape.rank >= 2
         and x2.shape.rank >= 2
-        and x1.shape[-1] != x2.shape[-2]
+        and _known_unequal(x1.shape[-1], x2.shape[-2])
     ):
         raise ValueError("matmul input shapes are incompatible")
     out_dtype = x1.dtype
@@ -1502,9 +1506,14 @@ def matmul(x1: Array, x2: Array, /) -> Array:
         x1 = tf.expand_dims(x1, -2)
     if x2_was_vector:
         x2 = tf.expand_dims(x2, -1)
-    batch_shape = tuple(tf.broadcast_static_shape(x1.shape[:-2], x2.shape[:-2]).as_list())
-    x1 = tf.broadcast_to(x1, batch_shape + _shape_tuple(x1)[-2:])
-    x2 = tf.broadcast_to(x2, batch_shape + _shape_tuple(x2)[-2:])
+    batch_shape = tf.broadcast_static_shape(x1.shape[:-2], x2.shape[:-2])
+    dynamic_batch_shape = tf.broadcast_dynamic_shape(tf.shape(x1)[:-2], tf.shape(x2)[:-2])
+    x1_matrix_shape = x1.shape[-2:]
+    x2_matrix_shape = x2.shape[-2:]
+    x1 = tf.broadcast_to(x1, tf.concat([dynamic_batch_shape, tf.shape(x1)[-2:]], axis=0))
+    x2 = tf.broadcast_to(x2, tf.concat([dynamic_batch_shape, tf.shape(x2)[-2:]], axis=0))
+    x1.set_shape(batch_shape.concatenate(x1_matrix_shape))
+    x2.set_shape(batch_shape.concatenate(x2_matrix_shape))
     out = tf.reduce_sum(tf.expand_dims(x1, -1) * tf.expand_dims(x2, -3), axis=-2)
     if x1_was_vector:
         out = tf.squeeze(out, axis=-2)
