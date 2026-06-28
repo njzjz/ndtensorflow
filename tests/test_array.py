@@ -66,6 +66,10 @@ def test_indexing_and_local_assignment():
     x[mask] = 0
     assert values(x) == [0, 9, 0]
 
+    empty = ndt.asarray([False])[ndt.asarray([], dtype=ndt.bool)]
+    assert empty.shape == (0,)
+    assert values(empty) == []
+
 
 def test_boolean_assignment_full_rank_mask_values():
     x = ndt.asarray([[[0] * 10] * 6], dtype=ndt.int64)
@@ -99,6 +103,7 @@ def test_namespace_creation_and_manipulation():
     assert values(y) == [[0, 1, 2], [3, 4, 5]]
     assert values(ndt.repeat(ndt.asarray([1, 2]), 2)) == [1, 1, 2, 2]
     assert values(ndt.tensordot(y, ndt.asarray([1, 1, 1]), axes=1)) == [3, 12]
+    assert values(ndt.tile(ndt.asarray(0, dtype=ndt.uint16), (2,))) == [0, 0]
 
 
 def test_array_methods_and_namespace_helpers():
