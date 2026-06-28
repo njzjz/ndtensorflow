@@ -5,6 +5,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 import tensorflow as tf
 
@@ -64,6 +65,30 @@ def test_indexing_and_local_assignment():
     mask = ndt.asarray([True, False, True])
     x[mask] = 0
     assert values(x) == [0, 9, 0]
+
+
+def test_boolean_assignment_full_rank_mask_values():
+    x = ndt.asarray([[[0] * 10] * 6], dtype=ndt.int64)
+    mask = ndt.asarray([[[idx < 5 for idx in range(10)] for _ in range(6)]])
+    x[mask] = ndt.arange(30, dtype=ndt.int64)
+
+    expected = np.zeros((1, 6, 10), dtype=np.int64)
+    expected[mask.unwrap().numpy()] = np.arange(30, dtype=np.int64)
+    assert values(x) == expected.tolist()
+
+
+def test_asarray_list_of_numpy_arrays_with_dtype():
+    out = ndt.asarray(
+        [np.ones((2, 3)), np.zeros((2, 3))],
+        dtype=ndt.float64,
+    )
+
+    assert out.shape == (2, 2, 3)
+    assert out.dtype == ndt.float64
+    assert values(out) == [
+        [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+    ]
 
 
 def test_namespace_creation_and_manipulation():

@@ -356,6 +356,11 @@ def _coerce_nested_to_dtype(obj: Any, dtype: DType) -> Any:
     obj = _unwrap(obj)
     if isinstance(obj, tf.Tensor):
         return obj
+    if hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        try:
+            return tf.convert_to_tensor(obj, dtype=dtype)
+        except (TypeError, ValueError):
+            pass
     if isinstance(obj, Sequence) and not isinstance(obj, str | bytes | bytearray | memoryview):
         return [_coerce_nested_to_dtype(item, dtype) for item in obj]
     return _coerce_scalar_to_dtype(obj, dtype)
