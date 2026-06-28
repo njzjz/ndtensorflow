@@ -242,9 +242,53 @@ def _normalize_axes(axis: int | Sequence[int] | None, ndim: int) -> tuple[int, .
     return axes
 
 
-def _shape_tuple(x: Array | tf.Tensor) -> tuple[int, ...]:
+def _shape_tuple(x: Array | tf.Tensor) -> tuple[int | tf.Tensor, ...]:
     tensor = _unwrap(x)
-    return tuple(tensor.shape.as_list())
+    static_shape = tensor.shape.as_list()
+    if py_all(dim is not None for dim in static_shape):
+        return tuple(static_shape)
+    dynamic_shape = tf.shape(tensor)
+    return tuple(dynamic_shape[ii] if dim is None else dim for ii, dim in enumerate(static_shape))
+
+
+def _normalize_shape_arg(shape: int | Sequence[Any] | tf.Tensor) -> Any:
+    if isinstance(shape, Array):
+        return shape.unwrap()
+    if isinstance(shape, tf.Tensor):
+        return shape
+    if isinstance(shape, int):
+        return (shape,)
+    return tuple(_unwrap(dim) for dim in shape)
+
+
+def _shape_arg_tensor(
+    shape: int | Sequence[Any] | tf.Tensor,
+    dtype: DType = tf.int32,
+) -> tf.Tensor:
+    shape = _normalize_shape_arg(shape)
+    if isinstance(shape, tf.Tensor):
+        return tf.cast(shape, dtype)
+    return tf.stack(
+        [
+            tf.cast(dim, dtype) if isinstance(dim, tf.Tensor) else tf.constant(dim, dtype)
+            for dim in shape
+        ]
+    )
+
+
+def _shape_arg_for_tf(shape: int | Sequence[Any] | tf.Tensor) -> Any:
+    shape = _normalize_shape_arg(shape)
+    if isinstance(shape, tuple) and py_any(isinstance(dim, tf.Tensor) for dim in shape):
+        return _shape_arg_tensor(shape)
+    return shape
+
+
+def _shape_product(shape: Sequence[int | tf.Tensor]) -> int | tf.Tensor:
+    if not shape:
+        return 1
+    if py_all(isinstance(dim, int) for dim in shape):
+        return math.prod(shape)
+    return tf.reduce_prod(_shape_arg_tensor(shape))
 
 
 def _dtype_of(x: Array | tf.Tensor | DType | complex) -> DType:
@@ -453,7 +497,9 @@ def _known_unequal(x1: int | None, x2: int | None) -> py_bool:
     return x1 is not None and x2 is not None and x1 != x2
 
 
-def _promote_two(x1: Array | tf.Tensor | complex, x2: Array | tf.Tensor | complex) -> tuple[tf.Tensor, tf.Tensor]:
+def _promote_two(
+    x1: Array | tf.Tensor | complex, x2: Array | tf.Tensor | complex
+) -> tuple[tf.Tensor, tf.Tensor]:
     dtype = result_type(x1, x2)
     return _to_tensor(x1, dtype), _to_tensor(x2, dtype)
 
@@ -560,7 +606,11 @@ def asarray(
                 dtype = _infer_nested_dtype(obj)
             out = _python_scalar_to_tensor(obj, dtype)
             if out is None:
-                obj_ = _coerce_nested_to_dtype(obj, dtype) if dtype is not None else _unwrap_nested(obj)
+                obj_ = (
+                    _coerce_nested_to_dtype(obj, dtype)
+                    if dtype is not None
+                    else _unwrap_nested(obj)
+                )
                 out = tf.convert_to_tensor(obj_, dtype=dtype, **kwargs)
         except (TypeError, ValueError):
             obj_ = list(obj)
@@ -579,7 +629,9 @@ def astype(
     device: Device | None = None,
 ) -> Array:
     with _device_context(device):
-        return Array._from_tensor(_astype_tensor(_unwrap(x), dtype, copy=copy or device is not None))
+        return Array._from_tensor(
+            _astype_tensor(_unwrap(x), dtype, copy=copy or device is not None)
+        )
 
 
 def from_dlpack(
@@ -615,15 +667,35 @@ def arange(
     del kwargs
     if stop is None:
         start, stop = 0, start
+    if (
+        isinstance(_unwrap(start), tf.Tensor)
+        or isinstance(_unwrap(stop), tf.Tensor)
+        or isinstance(_unwrap(step), tf.Tensor)
+    ):
+        if dtype is None:
+            dtype = _dtype_of(stop)
+            if dtype not in _numeric_dtypes:
+                dtype = tf.int32
+        start_ = tf.cast(_to_tensor(start), dtype)
+        stop_ = tf.cast(_to_tensor(stop), dtype)
+        step_ = tf.cast(_to_tensor(step), dtype)
+        with _device_context(device):
+            return Array._from_tensor(tf.range(start_, stop_, step_, dtype=dtype))
     with _device_context(device):
         if step > 0 and stop <= start or step < 0 and stop >= start:
             if dtype is None:
-                dtype = tf.int32 if py_all(isinstance(i, int) for i in (start, stop, step)) else tf.float32
+                dtype = (
+                    tf.int32
+                    if py_all(isinstance(i, int) for i in (start, stop, step))
+                    else tf.float32
+                )
             return Array._from_tensor(tf.zeros((0,), dtype=dtype))
         if dtype is None:
             if py_all(isinstance(i, int) for i in (start, stop, step)):
-                return Array._from_tensor(tf.range(start, stop, step))
-            return Array._from_tensor(tf.cast(tf.range(start, stop, step, dtype=tf.float64), tf.float32))
+                return Array._from_tensor(tf.range(start, stop, step, dtype=tf.int32))
+            return Array._from_tensor(
+                tf.cast(tf.range(start, stop, step, dtype=tf.float64), tf.float32)
+            )
         work_dtype = tf.int64 if dtype in _integral_dtypes else tf.float64
         return Array._from_tensor(tf.cast(tf.range(start, stop, step, dtype=work_dtype), dtype))
 
@@ -639,7 +711,7 @@ def empty(
     if isinstance(shape, int):
         shape = (shape,)
     with _device_context(device):
-        return Array._from_tensor(tf.zeros(shape, dtype=dtype or tf.float32))
+        return Array._from_tensor(tf.zeros(_shape_arg_for_tf(shape), dtype=dtype or tf.float32))
 
 
 def empty_like(
@@ -671,8 +743,8 @@ def eye(
     with _device_context(device):
         if k >= n_cols or k <= -n_rows:
             return Array._from_tensor(tf.zeros((n_rows, n_cols), dtype=dtype or tf.float32))
-        rows = tf.range(n_rows)[:, newaxis]
-        cols = tf.range(n_cols)[newaxis, :]
+        rows = tf.range(n_rows, dtype=tf.int32)[:, newaxis]
+        cols = tf.range(n_cols, dtype=tf.int32)[newaxis, :]
         return Array._from_tensor(tf.cast(cols - rows == k, dtype or tf.float32))
 
 
@@ -689,7 +761,7 @@ def full(
         shape = (shape,)
     with _device_context(device):
         value = _to_tensor(fill_value, dtype=dtype)
-        return Array._from_tensor(tf.broadcast_to(value, shape))
+        return Array._from_tensor(tf.broadcast_to(value, _shape_arg_for_tf(shape)))
 
 
 def full_like(
@@ -721,7 +793,11 @@ def linspace(
         if num == 0:
             return Array._from_tensor(tf.zeros((0,), dtype=dtype or tf.float32))
         out_dtype = dtype or tf.float32
-        work_dtype = out_dtype if out_dtype in _real_floating_dtypes | _complex_floating_dtypes else tf.float32
+        work_dtype = (
+            out_dtype
+            if out_dtype in _real_floating_dtypes | _complex_floating_dtypes
+            else tf.float32
+        )
         start_ = tf.convert_to_tensor(start, dtype=work_dtype)
         stop_ = tf.convert_to_tensor(stop, dtype=work_dtype)
         out = tf.linspace(start_, stop_, num if endpoint else num + 1)
@@ -739,7 +815,7 @@ def ones(
 ) -> Array:
     del kwargs
     with _device_context(device):
-        return Array._from_tensor(tf.ones(shape, dtype=dtype or tf.float32))
+        return Array._from_tensor(tf.ones(_shape_arg_for_tf(shape), dtype=dtype or tf.float32))
 
 
 def ones_like(
@@ -764,7 +840,7 @@ def zeros(
 ) -> Array:
     del kwargs
     with _device_context(device):
-        return Array._from_tensor(tf.zeros(shape, dtype=dtype or tf.float32))
+        return Array._from_tensor(tf.zeros(_shape_arg_for_tf(shape), dtype=dtype or tf.float32))
 
 
 def zeros_like(
@@ -782,15 +858,15 @@ def zeros_like(
 
 def tril(x: Array, /, *, k: int = 0) -> Array:
     tensor = _unwrap(x)
-    rows = tf.range(tensor.shape[-2])[:, newaxis]
-    cols = tf.range(tensor.shape[-1])[newaxis, :]
+    rows = tf.range(tensor.shape[-2], dtype=tf.int32)[:, newaxis]
+    cols = tf.range(tensor.shape[-1], dtype=tf.int32)[newaxis, :]
     return Array._from_tensor(tf.where(cols - rows <= k, tensor, tf.zeros((), dtype=tensor.dtype)))
 
 
 def triu(x: Array, /, *, k: int = 0) -> Array:
     tensor = _unwrap(x)
-    rows = tf.range(tensor.shape[-2])[:, newaxis]
-    cols = tf.range(tensor.shape[-1])[newaxis, :]
+    rows = tf.range(tensor.shape[-2], dtype=tf.int32)[:, newaxis]
+    cols = tf.range(tensor.shape[-1], dtype=tf.int32)[newaxis, :]
     return Array._from_tensor(tf.where(cols - rows >= k, tensor, tf.zeros((), dtype=tensor.dtype)))
 
 
@@ -825,7 +901,11 @@ def can_cast(from_: DType | Array, to: DType, /) -> py_bool:
         if to in _complex_floating_dtypes:
             return _dtype_bits[from_dtype] <= _dtype_bits[to] // 2
         return False
-    return from_dtype in _complex_floating_dtypes and to in _complex_floating_dtypes and _dtype_bits[from_dtype] <= _dtype_bits[to]
+    return (
+        from_dtype in _complex_floating_dtypes
+        and to in _complex_floating_dtypes
+        and _dtype_bits[from_dtype] <= _dtype_bits[to]
+    )
 
 
 def isdtype(
@@ -995,7 +1075,9 @@ def bitwise_and(x1: Any, x2: Any, /) -> Array:
 def bitwise_left_shift(x1: Any, x2: Any, /) -> Array:
     x1, x2 = _promote_two(x1, x2)
     out = tf.bitwise.left_shift(x1, x2)
-    return Array._from_tensor(tf.where(x2 >= tf.cast(_dtype_bits[x1.dtype], x2.dtype), tf.zeros((), dtype=x1.dtype), out))
+    return Array._from_tensor(
+        tf.where(x2 >= tf.cast(_dtype_bits[x1.dtype], x2.dtype), tf.zeros((), dtype=x1.dtype), out)
+    )
 
 
 def bitwise_invert(x: Array, /) -> Array:
@@ -1026,12 +1108,16 @@ def bitwise_xor(x1: Any, x2: Any, /) -> Array:
 
 def ceil(x: Array, /) -> Array:
     tensor = _unwrap(x)
-    return Array._from_tensor(tf.identity(tensor) if _is_integer(tensor.dtype) else tf.math.ceil(tensor))
+    return Array._from_tensor(
+        tf.identity(tensor) if _is_integer(tensor.dtype) else tf.math.ceil(tensor)
+    )
 
 
 def floor(x: Array, /) -> Array:
     tensor = _unwrap(x)
-    return Array._from_tensor(tf.identity(tensor) if _is_integer(tensor.dtype) else tf.math.floor(tensor))
+    return Array._from_tensor(
+        tf.identity(tensor) if _is_integer(tensor.dtype) else tf.math.floor(tensor)
+    )
 
 
 def trunc(x: Array, /) -> Array:
@@ -1043,7 +1129,9 @@ def trunc(x: Array, /) -> Array:
 
 def copysign(x1: Any, x2: Any, /) -> Array:
     x1, x2 = _promote_two(x1, x2)
-    return Array._from_tensor(tf.where(signbit(Array._from_tensor(x2)).unwrap(), -tf.abs(x1), tf.abs(x1)))
+    return Array._from_tensor(
+        tf.where(signbit(Array._from_tensor(x2)).unwrap(), -tf.abs(x1), tf.abs(x1))
+    )
 
 
 def hypot(x1: Any, x2: Any, /) -> Array:
@@ -1063,7 +1151,9 @@ def isfinite(x: Array, /) -> Array:
     if _is_integer(tensor.dtype) or tensor.dtype == tf.bool:
         return Array._from_tensor(tf.ones(_shape_tuple(tensor), dtype=tf.bool))
     if _is_complex(tensor.dtype):
-        return Array._from_tensor(tf.math.is_finite(tf.math.real(tensor)) & tf.math.is_finite(tf.math.imag(tensor)))
+        return Array._from_tensor(
+            tf.math.is_finite(tf.math.real(tensor)) & tf.math.is_finite(tf.math.imag(tensor))
+        )
     return Array._from_tensor(tf.math.is_finite(tensor))
 
 
@@ -1072,7 +1162,9 @@ def isinf(x: Array, /) -> Array:
     if _is_integer(tensor.dtype) or tensor.dtype == tf.bool:
         return Array._from_tensor(tf.zeros(_shape_tuple(tensor), dtype=tf.bool))
     if _is_complex(tensor.dtype):
-        return Array._from_tensor(tf.math.is_inf(tf.math.real(tensor)) | tf.math.is_inf(tf.math.imag(tensor)))
+        return Array._from_tensor(
+            tf.math.is_inf(tf.math.real(tensor)) | tf.math.is_inf(tf.math.imag(tensor))
+        )
     return Array._from_tensor(tf.math.is_inf(tensor))
 
 
@@ -1081,7 +1173,9 @@ def isnan(x: Array, /) -> Array:
     if _is_integer(tensor.dtype) or tensor.dtype == tf.bool:
         return Array._from_tensor(tf.zeros(_shape_tuple(tensor), dtype=tf.bool))
     if _is_complex(tensor.dtype):
-        return Array._from_tensor(tf.math.is_nan(tf.math.real(tensor)) | tf.math.is_nan(tf.math.imag(tensor)))
+        return Array._from_tensor(
+            tf.math.is_nan(tf.math.real(tensor)) | tf.math.is_nan(tf.math.imag(tensor))
+        )
     return Array._from_tensor(tf.math.is_nan(tensor))
 
 
@@ -1091,7 +1185,9 @@ def _complex_log(x: tf.Tensor) -> tf.Tensor:
 
 def log(x: Array, /) -> Array:
     tensor = _unwrap(x)
-    return Array._from_tensor(_complex_log(tensor) if _is_complex(tensor.dtype) else tf.math.log(tensor))
+    return Array._from_tensor(
+        _complex_log(tensor) if _is_complex(tensor.dtype) else tf.math.log(tensor)
+    )
 
 
 def floor_divide(x1: Any, x2: Any, /) -> Array:
@@ -1386,7 +1482,9 @@ def cumulative_prod(
     tensor = _unwrap(x)
     if axis is None:
         if tensor.shape.rank > 1:
-            raise ValueError("axis must be specified in cumulative_prod for more than one dimension")
+            raise ValueError(
+                "axis must be specified in cumulative_prod for more than one dimension"
+            )
         axis = 0
     axis = _normalize_axis(axis, tensor.shape.rank)
     dtype = dtype or _accumulation_dtype(tensor.dtype)
@@ -1435,7 +1533,14 @@ def argsort(
     stable: py_bool = True,
 ) -> Array:
     del stable
-    return Array._from_tensor(tf.argsort(_unwrap(x), axis=axis, direction="DESCENDING" if descending else "ASCENDING", stable=True))
+    return Array._from_tensor(
+        tf.argsort(
+            _unwrap(x),
+            axis=axis,
+            direction="DESCENDING" if descending else "ASCENDING",
+            stable=True,
+        )
+    )
 
 
 def sort(
@@ -1447,7 +1552,9 @@ def sort(
     stable: py_bool = True,
 ) -> Array:
     del stable
-    return Array._from_tensor(tf.sort(_unwrap(x), axis=axis, direction="DESCENDING" if descending else "ASCENDING"))
+    return Array._from_tensor(
+        tf.sort(_unwrap(x), axis=axis, direction="DESCENDING" if descending else "ASCENDING")
+    )
 
 
 def take(x: Array, indices: Array, /, *, axis: int | None = None) -> Array:
@@ -1458,8 +1565,8 @@ def take(x: Array, indices: Array, /, *, axis: int | None = None) -> Array:
     axis = _normalize_axis(axis, tensor.shape.rank)
     indices_ = tf.cast(_unwrap(indices), tf.int64)
     dim = tensor.shape[axis]
-    if dim is not None:
-        indices_ = tf.where(indices_ < 0, indices_ + tf.cast(dim, tf.int64), indices_)
+    dim = tf.shape(tensor, out_type=tf.int64)[axis] if dim is None else tf.cast(dim, tf.int64)
+    indices_ = tf.where(indices_ < 0, indices_ + dim, indices_)
     return Array._from_tensor(tf.gather(tensor, indices_, axis=axis))
 
 
@@ -1468,11 +1575,12 @@ def take_along_axis(x: Array, indices: Array, /, *, axis: int = -1) -> Array:
     indices_ = tf.cast(_unwrap(indices), tf.int64)
     axis = _normalize_axis(axis, tensor.shape.rank)
     dim = tensor.shape[axis]
-    if dim is not None:
-        indices_ = tf.where(indices_ < 0, indices_ + tf.cast(dim, tf.int64), indices_)
-    out_shape = indices_.shape
+    dim = tf.shape(tensor, out_type=tf.int64)[axis] if dim is None else tf.cast(dim, tf.int64)
+    indices_ = tf.where(indices_ < 0, indices_ + dim, indices_)
+    out_shape = tf.shape(indices_)
+    tensor_shape = _shape_tuple(tensor)
     coords = []
-    for dim_axis, dim_size in enumerate(tensor.shape):
+    for dim_axis, dim_size in enumerate(tensor_shape):
         if dim_axis == axis:
             coords.append(indices_)
             continue
@@ -1549,25 +1657,27 @@ def tensordot(
     if len(axes1) != len(axes2):
         raise ValueError("tensordot axes must have the same length")
     for axis1, axis2 in zip(axes1, axes2, strict=True):
-        if x1.shape[axis1] != x2.shape[axis2]:
+        if _known_unequal(x1.shape[axis1], x2.shape[axis2]):
             raise ValueError("tensordot contraction dimensions must match")
 
+    x1_shape = _shape_tuple(x1)
+    x2_shape = _shape_tuple(x2)
     x1_outer = tuple(axis for axis in range(x1.shape.rank) if axis not in axes1)
     x2_outer = tuple(axis for axis in range(x2.shape.rank) if axis not in axes2)
     x1_perm = x1_outer + axes1
     x2_perm = axes2 + x2_outer
     x1_t = tf.transpose(x1, x1_perm) if x1_perm else x1
     x2_t = tf.transpose(x2, x2_perm) if x2_perm else x2
-    x1_outer_shape = tuple(x1.shape[axis] for axis in x1_outer)
-    x2_outer_shape = tuple(x2.shape[axis] for axis in x2_outer)
-    contract_shape = tuple(x1.shape[axis] for axis in axes1)
-    outer1 = math.prod(x1_outer_shape) if x1_outer_shape else 1
-    outer2 = math.prod(x2_outer_shape) if x2_outer_shape else 1
-    contract = math.prod(contract_shape) if contract_shape else 1
-    x1_m = tf.reshape(x1_t, (outer1, contract))
-    x2_m = tf.reshape(x2_t, (contract, outer2))
+    x1_outer_shape = tuple(x1_shape[axis] for axis in x1_outer)
+    x2_outer_shape = tuple(x2_shape[axis] for axis in x2_outer)
+    contract_shape = tuple(x1_shape[axis] for axis in axes1)
+    outer1 = _shape_product(x1_outer_shape)
+    outer2 = _shape_product(x2_outer_shape)
+    contract = _shape_product(contract_shape)
+    x1_m = tf.reshape(x1_t, _shape_arg_for_tf((outer1, contract)))
+    x2_m = tf.reshape(x2_t, _shape_arg_for_tf((contract, outer2)))
     out = matmul(Array._from_tensor(x1_m), Array._from_tensor(x2_m)).unwrap()
-    return Array._from_tensor(tf.reshape(out, x1_outer_shape + x2_outer_shape))
+    return Array._from_tensor(tf.reshape(out, _shape_arg_for_tf(x1_outer_shape + x2_outer_shape)))
 
 
 def vecdot(x1: Array, x2: Array, /, *, axis: int = -1) -> Array:
@@ -1595,7 +1705,7 @@ def broadcast_shapes(*shapes: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def broadcast_to(x: Array, /, shape: tuple[int, ...]) -> Array:
-    return Array._from_tensor(tf.broadcast_to(_unwrap(x), shape))
+    return Array._from_tensor(tf.broadcast_to(_unwrap(x), _shape_arg_for_tf(shape)))
 
 
 def broadcast_arrays(*arrays: Array) -> tuple[Array, ...]:
@@ -1640,7 +1750,9 @@ def flip(x: Array, /, *, axis: int | tuple[int, ...] | None = None) -> Array:
 
 
 def meshgrid(*arrays: Array, indexing: Literal["xy", "ij"] = "xy") -> tuple[Array, ...]:
-    return tuple(Array._from_tensor(x) for x in tf.meshgrid(*[_unwrap(a) for a in arrays], indexing=indexing))
+    return tuple(
+        Array._from_tensor(x) for x in tf.meshgrid(*[_unwrap(a) for a in arrays], indexing=indexing)
+    )
 
 
 def moveaxis(
@@ -1654,6 +1766,17 @@ def moveaxis(
 
 def permute_dims(x: Array, /, axes: tuple[int, ...]) -> Array:
     return Array._from_tensor(tf.transpose(_unwrap(x), axes))
+
+
+def transpose(x: Array, /, axes: tuple[int, ...] | None = None) -> Array:
+    tensor = _unwrap(x)
+    if axes is None:
+        axes = tuple(range(tensor.shape.rank - 1, -1, -1))
+    return Array._from_tensor(tf.transpose(tensor, axes))
+
+
+def einsum(subscripts: str, *operands: Array) -> Array:
+    return Array._from_tensor(tf.einsum(subscripts, *[_to_tensor(x) for x in operands]))
 
 
 def repeat(x: Array, repeats: int | Array, /, *, axis: int | None = None) -> Array:
@@ -1672,7 +1795,7 @@ def repeat(x: Array, repeats: int | Array, /, *, axis: int | None = None) -> Arr
 
 def reshape(x: Array, /, shape: tuple[int, ...], *, copy: py_bool | None = None) -> Array:
     del copy
-    return Array._from_tensor(tf.reshape(_unwrap(x), shape))
+    return Array._from_tensor(tf.reshape(_unwrap(x), _shape_arg_for_tf(shape)))
 
 
 def roll(
@@ -1708,15 +1831,14 @@ def stack(arrays: tuple[Array, ...] | list[Array], /, *, axis: int = 0) -> Array
 
 def tile(x: Array, repetitions: tuple[int, ...], /) -> Array:
     tensor = _unwrap(x)
+    repetitions = tuple(_unwrap(rep) for rep in repetitions)
     if tensor.shape.rank > len(repetitions):
         repetitions = (1,) * (tensor.shape.rank - len(repetitions)) + tuple(repetitions)
     elif tensor.shape.rank < len(repetitions):
-        tensor = tf.reshape(tensor, (1,) * (len(repetitions) - tensor.shape.rank) + _shape_tuple(tensor))
-    out = tensor
-    for axis, rep in enumerate(repetitions):
-        if rep != 1:
-            out = tf.concat([out] * rep, axis=axis)
-    return Array._from_tensor(out)
+        tensor = tf.reshape(
+            tensor, (1,) * (len(repetitions) - tensor.shape.rank) + _shape_tuple(tensor)
+        )
+    return Array._from_tensor(tf.tile(tensor, _shape_arg_tensor(repetitions)))
 
 
 def unstack(x: Array, /, *, axis: int = 0) -> tuple[Array, ...]:
@@ -1756,7 +1878,9 @@ def count_nonzero(
     axis: int | tuple[int, ...] | None = None,
     keepdims: py_bool = False,
 ) -> Array:
-    return Array._from_tensor(tf.math.count_nonzero(_unwrap(x), axis=axis, keepdims=keepdims, dtype=tf.int64))
+    return Array._from_tensor(
+        tf.math.count_nonzero(_unwrap(x), axis=axis, keepdims=keepdims, dtype=tf.int64)
+    )
 
 
 def nonzero(x: Array, /) -> tuple[Array, ...]:
@@ -1910,6 +2034,7 @@ __all__ = [
     "diff",
     "divide",
     "e",
+    "einsum",
     "empty",
     "empty_like",
     "equal",
@@ -2004,6 +2129,7 @@ __all__ = [
     "tanh",
     "tensordot",
     "tile",
+    "transpose",
     "tril",
     "triu",
     "trunc",

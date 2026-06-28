@@ -101,6 +101,18 @@ def test_namespace_creation_and_manipulation():
     assert values(ndt.tensordot(y, ndt.asarray([1, 1, 1]), axes=1)) == [3, 12]
 
 
+def test_array_methods_and_namespace_helpers():
+    x = ndt.asarray([[1, 2], [3, 4]], dtype=ndt.int32)
+
+    assert values(x.reshape(4)) == [1, 2, 3, 4]
+    assert values(x.ravel()) == [1, 2, 3, 4]
+    assert ndt.asarray([[[1], [2]]]).squeeze(axis=2).shape == (1, 2)
+    np.testing.assert_array_equal(np.asarray(x), np.array([[1, 2], [3, 4]], dtype=np.int32))
+    assert values(ndt.transpose(x)) == [[1, 3], [2, 4]]
+    assert int(ndt.einsum("i,i->", ndt.asarray([1, 2]), ndt.asarray([3, 4]))) == 11
+    assert float(ndt.linalg.norm(ndt.asarray([3.0, 4.0]))) == 5.0
+
+
 def test_linalg_returns_wrapped_results():
     x = ndt.asarray([[1.0, 2.0], [3.0, 4.0]])
     inv = ndt.linalg.solve(x, ndt.asarray([1.0, 0.0]))
@@ -145,11 +157,15 @@ def test_array_api_special_value_regressions():
     assert z.imag == 0.0
     assert math.copysign(1.0, z.imag) > 0
 
-    r = float(ndt.remainder(ndt.asarray(-0.0, dtype=ndt.float64), ndt.asarray(1.0, dtype=ndt.float64)))
+    r = float(
+        ndt.remainder(ndt.asarray(-0.0, dtype=ndt.float64), ndt.asarray(1.0, dtype=ndt.float64))
+    )
     assert r == 0.0
     assert math.copysign(1.0, r) > 0
 
-    r = float(ndt.remainder(ndt.asarray(0.0, dtype=ndt.float64), ndt.asarray(-1.0, dtype=ndt.float64)))
+    r = float(
+        ndt.remainder(ndt.asarray(0.0, dtype=ndt.float64), ndt.asarray(-1.0, dtype=ndt.float64))
+    )
     assert r == 0.0
     assert math.copysign(1.0, r) < 0
 
@@ -179,6 +195,7 @@ def test_arange_float32_large_offset_regression():
 
     assert out.dtype == ndt.float32
     assert out.shape == (32,)
+
 
 def test_gradient_tape_accepts_array_sources_and_targets():
     x = ndt.asarray([1.0, 2.0, 3.0])
@@ -216,12 +233,39 @@ def test_xla_dynamic_shape_repeat_and_unique_regressions():
             inverse.inverse_indices.unwrap(),
         )
 
-    repeated, unique, inverse_values, inverse_indices = compiled(tf.constant([1, 2, 1], dtype=tf.int32))
+    repeated, unique, inverse_values, inverse_indices = compiled(
+        tf.constant([1, 2, 1], dtype=tf.int32)
+    )
 
     assert repeated.numpy().tolist() == [1, 1, 2, 2, 1, 1]
     assert unique.numpy().tolist() == [1, 2]
     assert inverse_values.numpy().tolist() == [1, 2]
     assert inverse_indices.numpy().tolist() == [0, 1, 0]
+
+
+def test_dynamic_boolean_mask_indexing():
+    @tf.function(
+        input_signature=[
+            tf.TensorSpec([None, None, 3], tf.float64),
+            tf.TensorSpec([None, None], tf.bool),
+        ]
+    )
+    def mask_values(array, mask):
+        return ndt.asarray(array)[mask].unwrap()
+
+    array = tf.reshape(tf.range(18, dtype=tf.float64), (2, 3, 3))
+    mask = tf.constant([[True, False, True], [False, True, False]])
+
+    np.testing.assert_equal(
+        mask_values(array, mask).numpy(),
+        np.array(
+            [
+                [0.0, 1.0, 2.0],
+                [6.0, 7.0, 8.0],
+                [12.0, 13.0, 14.0],
+            ]
+        ),
+    )
 
 
 def test_tensorflow_v1_graph_mode_session_regressions():

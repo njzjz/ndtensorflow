@@ -50,11 +50,18 @@ def outer(x1: Array, x2: Array, /) -> Array:
 
 def cross(x1: Array, x2: Array, /, *, axis: int = -1) -> Array:
     x1_, x2_ = _promote_two(x1, x2)
-    if x1_.shape[axis] != 3 or x2_.shape[axis] != 3:
+    if (x1_.shape[axis] is not None and x1_.shape[axis] != 3) or (
+        x2_.shape[axis] is not None and x2_.shape[axis] != 3
+    ):
         raise ValueError("cross product axis must have size 3")
     x1_ = _moveaxis(x1_, axis, -1)
     x2_ = _moveaxis(x2_, axis, -1)
     shape = tf.broadcast_static_shape(x1_.shape, x2_.shape)
+    shape = (
+        tf.broadcast_dynamic_shape(tf.shape(x1_), tf.shape(x2_))
+        if not shape.is_fully_defined()
+        else shape
+    )
     x1_, x2_ = tf.broadcast_to(x1_, shape), tf.broadcast_to(x2_, shape)
     return _wrap(_moveaxis(tf.linalg.cross(x1_, x2_), -1, axis))
 
@@ -121,7 +128,10 @@ def matrix_rank(x: Array, /, *, rtol: float | Array | None = None) -> Array:
     if rtol is None:
         tol = tf.reduce_max(s, axis=-1, keepdims=True) * max(tensor.shape[-2:]) * finfo(s.dtype).eps
     else:
-        tol = tf.reduce_max(s, axis=-1, keepdims=True) * tf.cast(_unwrap(rtol), s.dtype)[..., tf.newaxis]
+        tol = (
+            tf.reduce_max(s, axis=-1, keepdims=True)
+            * tf.cast(_unwrap(rtol), s.dtype)[..., tf.newaxis]
+        )
     return count_nonzero(Array._from_tensor(s > tol), axis=-1)
 
 
@@ -240,7 +250,9 @@ def vector_norm(
     tensor = _unwrap(x)
     out_dtype = _real_dtype_for(tensor.dtype)
     if axis == ():
-        return _wrap(tf.cast(tensor != 0, out_dtype) if ord == 0 else tf.cast(tf.abs(tensor), out_dtype))
+        return _wrap(
+            tf.cast(tensor != 0, out_dtype) if ord == 0 else tf.cast(tf.abs(tensor), out_dtype)
+        )
 
     if axis is None:
         x_ = tf.reshape(tensor, (-1,))
@@ -273,11 +285,26 @@ def vector_norm(
 
     if keepdims:
         shape = list(_shape_tuple(tensor))
-        axes = range(tensor.shape.rank) if axis is None else (axis if isinstance(axis, tuple) else (axis,))
+        axes = (
+            range(tensor.shape.rank)
+            if axis is None
+            else (axis if isinstance(axis, tuple) else (axis,))
+        )
         for a in axes:
             shape[a] = 1
         out = tf.reshape(out, shape)
     return _wrap(out)
+
+
+def norm(
+    x: Array,
+    ord: int | float | str | None = None,
+    axis: int | tuple[int, ...] | None = None,
+    keepdims: bool = False,
+) -> Array:
+    if isinstance(axis, tuple) and len(axis) == 2:
+        return matrix_norm(x, ord="fro" if ord is None else ord, keepdims=keepdims)
+    return vector_norm(x, ord=2 if ord is None else ord, axis=axis, keepdims=keepdims)
 
 
 __all__ = [
@@ -297,6 +324,7 @@ __all__ = [
     "inv",
     "matmul",
     "matrix_norm",
+    "norm",
     "matrix_power",
     "matrix_rank",
     "matrix_transpose",
