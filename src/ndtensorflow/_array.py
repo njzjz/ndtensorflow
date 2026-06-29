@@ -95,14 +95,21 @@ class Array(tf.experimental.ExtensionType):
         return len(self.shape)
 
     @property
-    def shape(self) -> tuple[int | None, ...]:
-        return tuple(self._tensor.shape.as_list())
+    def shape(self) -> tuple[int | tf.Tensor, ...]:
+        static_shape = self._tensor.shape.as_list()
+        if all(dim is not None for dim in static_shape):
+            return tuple(static_shape)
+        dynamic_shape = tf.shape(self._tensor)
+        return tuple(
+            dynamic_shape[ii] if dim is None else dim for ii, dim in enumerate(static_shape)
+        )
 
     @property
-    def size(self) -> int | None:
-        if any(dim is None for dim in self.shape):
-            return None
-        return math.prod(dim for dim in self.shape if dim is not None)
+    def size(self) -> int | tf.Tensor:
+        shape = self.shape
+        if all(isinstance(dim, int) for dim in shape):
+            return math.prod(shape)
+        return tf.size(self._tensor)
 
     @property
     def T(self) -> Array:  # noqa: N802
@@ -121,6 +128,25 @@ class Array(tf.experimental.ExtensionType):
         import ndtensorflow as xp
 
         return xp.astype(self, dtype, copy=copy, device=device)
+
+    def reshape(self, *shape: Any, copy: bool | None = None) -> Array:
+        import ndtensorflow as xp
+
+        if len(shape) == 1 and isinstance(shape[0], tuple | list):
+            shape = tuple(shape[0])
+        return xp.reshape(self, tuple(shape), copy=copy)
+
+    def ravel(self) -> Array:
+        import ndtensorflow as xp
+
+        return xp.reshape(self, (-1,))
+
+    def squeeze(self, axis: int | tuple[int, ...] | None = None) -> Array:
+        if axis is None:
+            return type(self)._from_tensor(tf.squeeze(self._tensor))
+        import ndtensorflow as xp
+
+        return xp.squeeze(self, axis=axis)
 
     def to_device(self, device: str, /, *, stream: int | Any | None = None) -> Array:
         del stream
@@ -157,11 +183,17 @@ class Array(tf.experimental.ExtensionType):
 
         return xp
 
+    def __array__(self, dtype: Any | None = None) -> Any:
+        if not tf.executing_eagerly():
+            raise TypeError("cannot convert a TensorFlow graph tensor to a NumPy array")
+        array = self._tensor.numpy()
+        return array.astype(dtype) if dtype is not None else array
+
     def __len__(self) -> int:
         if self.ndim == 0:
             raise TypeError("len() of unsized array")
         dim = self.shape[0]
-        if dim is None:
+        if not isinstance(dim, int):
             raise TypeError("len() requires a statically known leading dimension")
         return dim
 
@@ -173,18 +205,36 @@ class Array(tf.experimental.ExtensionType):
     def __getitem__(self, key: Any, /) -> Array:
         key = _normalize_index_key(key)
         if isinstance(key, tf.Tensor) and key.dtype == tf.bool:
-            if key.shape.rank > self.ndim or not all(
-                key_dim in (x_dim, 0) for x_dim, key_dim in zip(self.shape, key.shape)
-            ):
+            rank = key.shape.rank
+            if rank is None:
+                raise IndexError("boolean index rank must be statically known")
+            if rank > self.ndim:
                 raise IndexError("boolean index shape is incompatible with indexed array")
-            if key.shape.rank == 0:
+            if rank == 0:
                 tensor = tf.expand_dims(self._tensor, 0)
                 mask = tf.reshape(key, (1,))
                 return type(self)._from_tensor(tf.boolean_mask(tensor, mask))
-            if any(dim == 0 for dim in key.shape):
-                shape = (0,) + self.shape[key.shape.rank :]
+            tensor_shape = self._tensor.shape.as_list()
+            key_shape = key.shape.as_list()
+            if any(key_dim == 0 for key_dim in key_shape):
+                shape = tf.concat(
+                    [tf.constant([0], dtype=tf.int32), tf.shape(self._tensor)[rank:]],
+                    axis=0,
+                )
                 return type(self)._from_tensor(tf.zeros(shape, dtype=self.dtype))
-            return type(self)._from_tensor(tf.boolean_mask(self._tensor, key))
+            if any(
+                tensor_dim is not None and key_dim is not None and tensor_dim != key_dim
+                for tensor_dim, key_dim in zip(tensor_shape[:rank], key_shape, strict=True)
+            ):
+                raise IndexError("boolean index shape is incompatible with indexed array")
+
+            shape_assert = tf.debugging.assert_equal(
+                tf.shape(key),
+                tf.shape(self._tensor)[:rank],
+                message="boolean index shape is incompatible with indexed array",
+            )
+            with tf.control_dependencies([shape_assert]):
+                return type(self)._from_tensor(tf.boolean_mask(self._tensor, key))
         if isinstance(key, tf.Tensor) and _is_integer_index_tensor(key) and key.shape.rank != 0:
             return type(self)._from_tensor(
                 tf.gather(self._tensor, _normalize_integer_index(key, self.shape[0]), axis=0)
@@ -320,9 +370,7 @@ def _advanced_integer_getitem(tensor: tf.Tensor, key: Any) -> tf.Tensor | None:
         return None
     if any(
         not (
-            isinstance(item, int)
-            or isinstance(item, tf.Tensor)
-            and _is_integer_index_tensor(item)
+            isinstance(item, int) or isinstance(item, tf.Tensor) and _is_integer_index_tensor(item)
         )
         for item in key
     ):
